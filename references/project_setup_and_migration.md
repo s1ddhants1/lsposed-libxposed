@@ -128,6 +128,11 @@ staticScope=false
 # If true, framework attempts automatic hot reload on APK update (API 102+)
 # (Optional, default: false)
 autoHotReload=true
+
+# Global exception mode: "protective" (default) catches/logs hook exceptions;
+# "passthrough" rethrows exceptions to the caller
+# (Optional, default: protective)
+exceptionMode=protective
 ```
 
 | Property | Format | Optional | Meaning |
@@ -136,9 +141,10 @@ autoHotReload=true
 | `targetApiVersion` | int | **No** | Target Xposed API version the module is designed for |
 | `staticScope` | boolean | Yes | If true, users cannot add apps outside `scope.list` |
 | `autoHotReload` | boolean | Yes | If true, auto hot reload on APK update (API 102+) |
+| `exceptionMode` | string | Yes | Default exception handling: `protective` or `passthrough` |
 
 > [!NOTE]
-> **Verified on device**: The live `lspctl module list --json` output confirms these fields are parsed and reported per-module. For example, `io.github.s1ddhants1.swiftbackupprem` reports `"minApiVersion":101,"targetApiVersion":102,"staticScope":true,"autoHotReload":true`.
+> **Verified on device**: The live `lspctl module list --json` output confirms these fields are parsed and reported per-module. For example, `io.github.s1ddhants1.swiftbackupprem` reports `"minApiVersion":101,"targetApiVersion":102,"staticScope":true,"autoHotReload":true`. Note also that `#` at the start of a line denotes a comment in all `*.list` metadata files.
 
 ### 2.2 `java_init.list`
 Fully qualified class names extending `XposedModule` (one per line):
@@ -192,9 +198,10 @@ In modern LibXposed, module identification uses native Android attributes instea
         </activity>
 
         <!-- XposedProvider for receiving LSPosed framework service binder -->
+        <!-- Note: When using libxposed:service, this is merged automatically by Gradle -->
         <provider
             android:name="io.github.libxposed.service.XposedProvider"
-            android:authorities="${applicationId}.xposed_provider"
+            android:authorities="${applicationId}.XposedService"
             android:exported="true"
             android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
     </application>

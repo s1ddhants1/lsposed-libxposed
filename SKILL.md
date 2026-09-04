@@ -44,6 +44,7 @@ For deep technical specifications, see the detailed reference files:
 - ⚡ **[Native Hooking Specification](./references/native_hooking.md)**: C/C++ NDK hooking, `NativeAPIEntries`, `native_init`, `NativeOnModuleLoaded`, `JNIEnv` function table hooks, and multi-arch settings.
 - 🔍 **[Helper & Matcher DSL Guide](./references/helper_and_matcher_dsl.md)**: `libxposed:helper` & `helper-ktx`, `Reflector`, type-safe Matchers, and `@DexAnalysis` bytecode inspection for obfuscated targets.
 - 🛠️ **[Project Setup, Packaging & Migration](./references/project_setup_and_migration.md)**: Gradle setup, `libs.versions.toml`, `module.prop`, ProGuard rules, Android Lint (`@SinceApi`, `@InternalApi`), and legacy migration step-by-step.
+- 💻 **[Daemon Architecture & lspctl CLI Guide](./references/lspctl_cli_and_daemon_internals.md)**: Live debugging via `lspctl`, JSON schema, module and scope mutations, Developer Mode security guards, SQLite database schema (`modules_config.db`), and safe mode recovery.
 
 ---
 

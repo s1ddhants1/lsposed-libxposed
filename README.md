@@ -22,6 +22,7 @@ npx skills add s1ddhants1/lsposed-libxposed
 - **Service IPC & Remote Preferences**: Daemon-backed cross-process configuration, Remote Files, `XposedServiceHelper`, dynamic scope requests.
 - **Native C/C++ Hooks**: NDK hooks via `NativeAPIEntries`, `native_init`, `NativeOnModuleLoaded`, and `JNIEnv` function table hooks.
 - **Reflection & Bytecode Matching**: `libxposed:helper`, `Reflector`, and `@DexAnalysis` for obfuscated applications.
+- **Daemon Architecture & lspctl CLI**: Remote management CLI, SQLite databases (`modules_config.db`), Developer Mode guards, and safe mode recovery.
 - **Legacy Migration**: Step-by-step migration from legacy `XposedBridge` (`de.robv.android.xposed`) to modern LibXposed standards.
 
 ## 📂 Repository Layout
@@ -34,7 +35,8 @@ npx skills add s1ddhants1/lsposed-libxposed
 │   ├── service_and_ipc.md
 │   ├── native_hooking.md
 │   ├── helper_and_matcher_dsl.md
-│   └── project_setup_and_migration.md
+│   ├── project_setup_and_migration.md
+│   └── lspctl_cli_and_daemon_internals.md
 └── examples/                # Runnable reference implementations
     ├── kotlin_modern_module/
     ├── java_modern_module/

@@ -28,8 +28,9 @@ npx skills add s1ddhants1/lsposed-libxposed
 ## 📂 Repository Layout
 
 ```
-├── SKILL.md                 # Core instructions and quick cheatsheet
+├── SKILL.md                 # LLM entry point: anti-hallucination rules, intent router, templates, diagnostics
 ├── references/              # Detailed technical documentation
+│   ├── INDEX.md             # Master reference catalog and API cross-reference table
 │   ├── modern_libxposed_api.md
 │   ├── hot_reloading_and_lifecycle.md
 │   ├── service_and_ipc.md

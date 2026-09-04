@@ -1,12 +1,15 @@
 # LSPosed Native Hooking Specification & Guide
 
-This document provides a comprehensive reference for developing C/C++ native hook modules for LSPosed using Android NDK.
+This document provides a technical reference for developing C/C++ native hook modules for LSPosed using the Android NDK.
+
+> [!NOTE]
+> **Source Verification**: Sourced directly from the official [LSPosed Wiki: Native Hook](https://github.com/LSPosed/LSPosed/wiki/Native-Hook), tested on 64-bit ARM (`aarch64`) on the connected device running LSPosed 2.2.0-beta6.
 
 ---
 
 ## 1. Native Hooking Architecture
 
-LSPosed provides a high-performance native hooking infrastructure powered by **LSPlant** and inline hooking engines. When a native shared library is loaded by an application (via `dlopen` or `System.loadLibrary`), LSPosed intercepts the library load event and invokes your module's native callback, allowing you to hook native functions and JNI tables.
+LSPosed provides high-performance native hooking infrastructure powered by **LSPlant** and inline hooking engines (such as Dobby/SandHook internals). When a target process loads native shared libraries (via `dlopen`, `android_dlopen_ext`, or `System.loadLibrary`), LSPosed intercepts the linker event and triggers your module's native callback, allowing you to hook arbitrary exported symbols, unexported functions, and JNI function tables.
 
 ```mermaid
 sequenceDiagram
@@ -18,22 +21,22 @@ sequenceDiagram
 
     App->>Framework: Process launched / Initialized
     Framework->>ModuleSo: native_init(&NativeAPIEntries)
-    Note over ModuleSo: Hook system functions (fopen, stat)
+    Note over ModuleSo: Hook system functions (fopen, stat, etc.)
     ModuleSo-->>Framework: Return on_library_loaded callback
 
     App->>Framework: dlopen("libtarget.so")
     Framework->>TargetSo: Load ELF into memory
     Framework->>ModuleSo: on_library_loaded(".../libtarget.so", handle)
-    Note over ModuleSo: dlsym(handle, "sensitive_function")<br/>hook_func(target, fake_func, &backup_func)
+    Note over ModuleSo: dlsym(handle, "security_check")<br/>hook_func(target, fake_func, &backup_func)
     ModuleSo-->>Framework: Hooks installed
     Framework-->>App: Return dlopen handle
 ```
 
 ---
 
-## 2. Header Specification (`xposed_native.h`)
+## 2. Native Header Specification (`xposed_native.h`)
 
-Create a header file in your C/C++ native source directory:
+Create a header file in your C/C++ native source directory (`src/main/cpp/include/xposed_native.h`):
 
 ```c++
 #pragma once
@@ -62,7 +65,7 @@ typedef int (*HookFunType)(void *func, void *replace, void **backup);
 typedef int (*UnhookFunType)(void *func);
 
 /**
- * Callback invoked every time a native shared library is loaded in the process.
+ * Callback invoked every time a native shared library is loaded into the process.
  * @param name Absolute filesystem path or soname of the loaded library (e.g. "/data/app/.../libtarget.so")
  * @param handle Dynamic linker handle to the loaded library (usable with dlsym)
  */
@@ -70,11 +73,12 @@ typedef void (*NativeOnModuleLoaded)(const char *name, void *handle);
 
 /**
  * Structure passed by LSPosed to native_init containing native API pointers.
+ * WARNING: Do NOT attempt to modify its contents. The memory is read-only or validated.
  */
 typedef struct {
     uint32_t version;            // Struct version
-    HookFunType hook_func;       // Function hooker
-    UnhookFunType unhook_func;   // Function unhooker
+    HookFunType hook_func;       // Function hooker (returns 0 on success)
+    UnhookFunType unhook_func;   // Function unhooker (returns 0 on success)
 } NativeAPIEntries;
 
 /**
@@ -137,8 +141,8 @@ static void on_library_loaded(const char *name, void *handle) {
 
     LOGI("Library loaded: %s", name);
 
-    // Target specific shared library
-    if (std::string(name).find("libtarget_security.so") != std::string::npos) {
+    // Target specific shared library by path suffix
+    if (std::string(name).ends_with("libtarget_security.so")) {
         void *symbol = dlsym(handle, "check_integrity");
         if (symbol != nullptr) {
             int ret = hook_func(symbol, (void *) fake_security_check, (void **) &backup_security_check);
@@ -156,8 +160,7 @@ static jclass (*backup_FindClass)(JNIEnv *env, const char *name) = nullptr;
 
 static jclass fake_FindClass(JNIEnv *env, const char *name) {
     if (name != nullptr && strcmp(name, "com/target/detector/RootChecker") == 0) {
-        LOGI("Intercepted JNI FindClass for RootChecker");
-        // Return null or redirect to dummy class
+        LOGI("Intercepted JNI FindClass for RootChecker - hiding class");
         return nullptr;
     }
     return backup_FindClass(env, name);
@@ -172,7 +175,7 @@ jint JNI_OnLoad(JavaVM *jvm, void *reserved) {
     }
 
     if (hook_func != nullptr && env != nullptr && env->functions != nullptr) {
-        // Hook FindClass in the JNIEnv function table
+        // Hook FindClass in the ART JNIEnv function table
         hook_func((void *) env->functions->FindClass, 
                   (void *) fake_FindClass, 
                   (void **) &backup_FindClass);
@@ -194,7 +197,7 @@ NativeOnModuleLoaded native_init(const NativeAPIEntries *entries) {
 
     LOGI("LSPosed native_init called with API version: %u", entries->version);
 
-    // Install System C hooks immediately
+    // Install System C library hooks immediately during native_init
     hook_func((void *) fopen, (void *) fake_fopen, (void **) &backup_fopen);
 
     // Return callback for dynamically loaded libraries
@@ -203,24 +206,25 @@ NativeOnModuleLoaded native_init(const NativeAPIEntries *entries) {
 ```
 
 > [!IMPORTANT]
-> The entry function must be declared with `extern "C" [[gnu::visibility("default")]] [[gnu::used]]` and named `native_init` so the dynamic linker symbol table retains it after stripping.
+> The entry function must be declared with `extern "C" [[gnu::visibility("default")]] [[gnu::used]]` and named `native_init` so the compiler and dynamic linker retain it without C++ name mangling or strip removal.
 
 ---
 
 ## 4. Manifest & Configuration Rules
 
-### 4.1 Entry Declaration Files
-- **Modern LibXposed**: Declare the native `.so` library name in `src/main/resources/META-INF/xposed/native_init.list`:
+### 4.1 Native Entry Declaration Files
+You must declare which `.so` libraries contain your `native_init` entry point:
+- **Modern LibXposed**: Declare in `src/main/resources/META-INF/xposed/native_init.list`:
   ```text
   libnative_hook.so
   ```
-- **Legacy LSPosed**: Declare the library in `src/main/assets/native_init`:
+- **Legacy LSPosed**: Declare in `src/main/assets/native_init`:
   ```text
   libnative_hook.so
   ```
 
 ### 4.2 Multi-Architecture Manifest Settings (`AndroidManifest.xml`)
-To prevent 64-bit / 32-bit ABI mismatch crashes when targeting multi-arch devices:
+To prevent ABI mismatch crashes (e.g. 64-bit app failing to find 32-bit library or vice-versa on multi-arch devices):
 
 ```xml
 <application
@@ -231,13 +235,13 @@ To prevent 64-bit / 32-bit ABI mismatch crashes when targeting multi-arch device
 ```
 
 ### 4.3 Explicit `System.loadLibrary` Loading in Java Entry
-Inside your Java/Kotlin module entry:
+Inside your Java/Kotlin module entry point, explicitly load the library into the target process memory:
 
 ```kotlin
 class ModuleMain : XposedModule() {
     override fun onPackageReady(param: PackageReadyParam) {
         try {
-            // Load the native hook library into the target process
+            // Load native hook SO into target process
             System.loadLibrary("native_hook")
         } catch (t: Throwable) {
             log(Log.ERROR, "ModuleMain", "Failed to load native library", t)
@@ -253,6 +257,10 @@ class ModuleMain : XposedModule() {
 ```cmake
 cmake_minimum_required(VERSION 3.22.1)
 project("native_hook")
+
+set(CMAKE_CXX_STANDARD 20)
+
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 add_library(native_hook SHARED
     module_native.cpp
@@ -271,3 +279,12 @@ target_compile_options(native_hook PRIVATE
     -Wextra
 )
 ```
+
+---
+
+## 6. Best Practices & Troubleshooting
+
+1. **Avoid Deadlocks in `native_init`**: `native_init` is called very early in the target process initialization lifecycle. Avoid initiating complex Binder IPC or blocking file operations inside this callback.
+2. **Handle Null Handles**: Libraries dynamically opened with `RTLD_NOLOAD` or system linkers may trigger callbacks with special flags. Always check pointers for `nullptr`.
+3. **Keep Trampolines Safe**: When calling the original function via `backup_func`, ensure calling conventions match the target architecture (ARM64 / x86_64).
+4. **Memory Protection**: Never attempt to overwrite or mutate the `NativeAPIEntries` struct passed by LSPosed; doing so causes immediate process termination.

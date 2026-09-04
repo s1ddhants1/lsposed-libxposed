@@ -76,12 +76,16 @@ class MainActivity : AppCompatActivity() {
                 svc.hotReloadModule(target, data) { targetProcess, result ->
                     runOnUiThread {
                         when (result.status) {
-                            HotReloadResult.Status.SUCCESS ->
+                            HotReloadResult.Status.SUCCEEDED ->
                                 Toast.makeText(this@MainActivity, "Hot reloaded: ${targetProcess.processName}", Toast.LENGTH_SHORT).show()
                             HotReloadResult.Status.FAILED ->
                                 Toast.makeText(this@MainActivity, "Reload failed: ${result.message}", Toast.LENGTH_LONG).show()
                             HotReloadResult.Status.UNSUPPORTED ->
                                 Toast.makeText(this@MainActivity, "Reload unsupported on target", Toast.LENGTH_SHORT).show()
+                            HotReloadResult.Status.IN_PROGRESS ->
+                                Toast.makeText(this@MainActivity, "Reload in progress", Toast.LENGTH_SHORT).show()
+                            HotReloadResult.Status.PROCESS_DIED ->
+                                Toast.makeText(this@MainActivity, "Target process died during reload", Toast.LENGTH_SHORT).show()
                         }
                     }
                 }

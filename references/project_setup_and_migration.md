@@ -2,6 +2,9 @@
 
 This document covers Gradle build setup, packaging rules, metadata file definitions, Lint rules, and a step-by-step migration guide from legacy XposedBridge to modern LibXposed.
 
+> [!NOTE]
+> **Source**: Metadata format sourced from the [LSPosed Wiki](https://github.com/LSPosed/LSPosed/wiki/Develop-Xposed-Modules-Using-Modern-Xposed-API), dependency coordinates from [libxposed/api](https://github.com/libxposed/api), [libxposed/service](https://github.com/libxposed/service), and [libxposed/helper](https://github.com/libxposed/helper) repositories. Module configuration verified against live LSPosed 2.2.0-it via `lspctl module list --json`.
+
 ---
 
 ## 1. Project Configuration & Dependencies
@@ -105,6 +108,9 @@ app/src/main/resources/META-INF/xposed/
 └── scope.list          # Default target package names
 ```
 
+> [!IMPORTANT]
+> Per the wiki: "Create files in `src/main/resources/META-INF`, and Gradle will automatically package files into your APK." Modern API does not use `<meta-data>` tags in AndroidManifest.xml. Module name uses `android:label`, module description uses `android:description`.
+
 ### 2.1 `module.prop`
 Java properties format defining module capabilities:
 
@@ -116,11 +122,23 @@ minApiVersion=101
 targetApiVersion=102
 
 # If true, users cannot add arbitrary apps outside the declared scope in LSPosed Manager
+# (Optional, default: false)
 staticScope=false
 
 # If true, framework attempts automatic hot reload on APK update (API 102+)
+# (Optional, default: false)
 autoHotReload=true
 ```
+
+| Property | Format | Optional | Meaning |
+| :--- | :--- | :--- | :--- |
+| `minApiVersion` | int | **No** | Minimal Xposed API version required by the module |
+| `targetApiVersion` | int | **No** | Target Xposed API version the module is designed for |
+| `staticScope` | boolean | Yes | If true, users cannot add apps outside `scope.list` |
+| `autoHotReload` | boolean | Yes | If true, auto hot reload on APK update (API 102+) |
+
+> [!NOTE]
+> **Verified on device**: The live `lspctl module list --json` output confirms these fields are parsed and reported per-module. For example, `io.github.s1ddhants1.swiftbackupprem` reports `"minApiVersion":101,"targetApiVersion":102,"staticScope":true,"autoHotReload":true`.
 
 ### 2.2 `java_init.list`
 Fully qualified class names extending `XposedModule` (one per line):
@@ -128,6 +146,9 @@ Fully qualified class names extending `XposedModule` (one per line):
 com.example.mymodule.ModuleMain
 com.example.mymodule.SystemHookEntry
 ```
+
+> [!IMPORTANT]
+> Per the wiki: "Java entry should now implement `io.github.libxposed.api.XposedModule`. Note that `XposedModule` no longer receives `XposedInterface` and `ModuleLoadedParam` in its constructor; the framework calls `attachFramework(XposedInterface)` automatically."
 
 ### 2.3 `native_init.list` (Optional for C++ native hooks)
 Names of native `.so` libraries containing `native_init`:
@@ -146,7 +167,7 @@ com.target.application
 
 ## 3. AndroidManifest.xml (Modern Standard)
 
-In modern LibXposed, module identification is integrated with native Android attributes instead of `<meta-data>` tags:
+In modern LibXposed, module identification uses native Android attributes instead of `<meta-data>` tags:
 
 ```xml
 <?xml version="1.0" encoding="utf-8"?>
@@ -213,18 +234,41 @@ LibXposed includes custom lint detectors:
 
 ---
 
-## 6. Migration Guide: Legacy XposedBridge to Modern LibXposed
+## 6. Legacy vs Modern Module Comparison
+
+### Content Sharing APIs (from LSPosed Wiki)
+
+| Name | API | Supported | Storage Location | Change Listener | Large Content |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| New XSharedPreferences | Legacy (ext) | ❌ Since v2.1.0 | `/data/misc/<random>/prefs/<module>` | ❌ | ❌ |
+| XSharedPreferences | Legacy | ✅ Since v2.0.0 | Module app internal storage | ❌ | ❌ |
+| Remote Preferences | Modern | ✅ Since v1.9.0 | LSPosed database | ✅ | ❌ |
+| Remote Files | Modern | ✅ Since v1.9.0 | `/data/adb/lspd/modules/<user>/<module>` | ❌ | ✅ |
+
+### Legacy Module Capabilities
+Per the wiki, legacy modules (`targetApiVersion=93`) are still supported but with caveats:
+- Legacy modules can still use `de.robv.android.xposed` APIs
+- **Modules targeting API 102+ cannot call legacy APIs** (enforced at runtime)
+- **Module apps are no longer hooked by themselves** with the modern API
+
+---
+
+## 7. Migration Guide: Legacy XposedBridge to Modern LibXposed
 
 ### Step 1: Migrate Configuration Files
 - Move `assets/xposed_init` ➡️ `src/main/resources/META-INF/xposed/java_init.list`.
 - Move `assets/native_init` ➡️ `src/main/resources/META-INF/xposed/native_init.list`.
-- Create `src/main/resources/META-INF/xposed/module.prop`.
+- Create `src/main/resources/META-INF/xposed/module.prop` with `minApiVersion` and `targetApiVersion`.
 - Move `xposedscope` meta-data / string arrays ➡️ `src/main/resources/META-INF/xposed/scope.list`.
+- Remove all `<meta-data>` tags from AndroidManifest.xml related to Xposed.
+- Use `android:label` for module name and `android:description` for module description.
 
 ### Step 2: Migrate Entry Class
 - Change `implements IXposedHookLoadPackage` ➡️ `extends XposedModule`.
 - Remove manual `XposedBridge.log(...)` ➡️ Use `log(priority, tag, msg)`.
 - Replace `handleLoadPackage(XC_LoadPackage.LoadPackageParam)` ➡️ `onPackageReady(PackageReadyParam)`.
+- Do NOT perform initialization in the constructor; wait for `onModuleLoaded()`.
+- The framework calls `attachFramework()` automatically — do not call it manually.
 
 ### Step 3: Migrate Hooking Invocations
 ```java
@@ -253,15 +297,24 @@ Method loginMethod = targetClass.getDeclaredMethod("login", String.class);
 hook(loginMethod).intercept(chain -> {
     // Modify argument for down-chain calls
     Object[] newArgs = new Object[]{ "spoofed_user" };
-    
+
     // Call original / next hooker
     Object originalResult = chain.proceed(newArgs);
-    
+
     // Override return value
     return true;
 });
 ```
 
 ### Step 4: Migrate Data Sharing
-- Replace `XSharedPreferences` ➡️ `getRemotePreferences("name")`.
+- Replace `XSharedPreferences` ➡️ `getRemotePreferences("name")` in hooked targets.
 - Module app writes via `XposedService.getRemotePreferences("name")`.
+- Replace file-based data sharing ➡️ Remote Files API.
+
+### Step 5: Migrate Scope Declaration
+- Remove `<meta-data>` scope tags from AndroidManifest.xml.
+- Create `scope.list` with one package name per line.
+- For dynamic scope management, use `XposedService.requestScope()` API.
+
+> [!NOTE]
+> Per the wiki: "We no longer provide interfaces like `XposedHelpers` in the framework anymore. But we will offer official libraries for a more friendly development kit." See [libxposed/helper](https://github.com/libxposed/helper) for the reflection and matcher DSL library.

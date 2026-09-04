@@ -1,240 +1,349 @@
 # LibXposed Service & Inter-Process Communication (IPC)
 
-This document provides a comprehensive guide for cross-process communication between the **Module App (UI/Settings)**, the **LSPosed Framework Daemon**, and **Hooked Target Processes**.
+This document provides a technical reference for cross-process communication between the **Module Configuration UI App**, the **LSPosed Framework Daemon**, and **Hooked Target Processes** using `io.github.libxposed:service` (API 101 / 102+).
+
+> [!NOTE]
+> **Source Verification**: Sourced directly from [libxposed/service](https://github.com/libxposed/service) source code, the [LSPosed Wiki: New XSharedPreferences](https://github.com/LSPosed/LSPosed/wiki/New-XSharedPreferences), the official [libxposed-example](https://github.com/libxposed/example), and validated against live LSPosed 2.2.0-beta6 running on the connected Android device.
 
 ---
 
-## 1. Content Sharing Architecture & Evolution
+## 1. Evolution of Content Sharing & IPC
 
-In legacy Xposed, modules shared settings with hooked applications using `XSharedPreferences`, which relied on the Android filesystem permission `MODE_WORLD_READABLE`. Starting with Android Nougat (7.0+) and enforced in Oreo (8.0+), world-readable files were strictly banned by SELinux and Android security policies.
+Android's evolving security model (SELinux, scoped storage, multi-user isolation) progressively broke traditional module configuration sharing methods:
 
-### Comparison of Content Sharing Mechanisms
-| Feature | Legacy XSharedPreferences | New XSharedPreferences (LSPosed v1.x) | Modern Remote Preferences (LibXposed) | Modern Remote Files (LibXposed) |
-| :--- | :--- | :--- | :--- | :--- |
-| **API Framework** | Legacy `de.robv...` | LSPosed API 93+ | LibXposed API 101/102+ | LibXposed API 101/102+ |
-| **Storage Location** | `/data/data/<module>/shared_prefs/` | `/data/misc/<random>/prefs/<module>` | **LSPosed Daemon Database** | `/data/adb/lspd/modules/<user>/<module>` |
-| **Access in Module** | Read / Write (`Context`) | Read / Write (`MODE_WORLD_READABLE`) | **Read / Write** (`XposedService`) | **Read / Write** (`XposedService`) |
-| **Access in Target** | Read-Only | Read-Only | **Read-Only** (`XposedInterface`) | **Read-Only** (`XposedInterface`) |
-| **Change Listeners**| ❌ No | ⚠️ Yes (physical file watch, key is null) | ✅ **Yes (Key-specific notifications)** | ❌ No |
-| **Payload Size** | Small/Medium XML | Small/Medium XML | Key-Value Pairs (< 1 MB) | **Large Blobs & Arbitrary Files** |
-| **Multi-User Safe** | ❌ No | ⚠️ Partial | ✅ **Fully Multi-User Isolated** | ✅ **Fully Multi-User Isolated** |
+| Mechanism | Legacy Xposed (`de.robv...`) | LSPosed v1.x (API 93+) | Modern LibXposed (API 101/102+) |
+| :--- | :--- | :--- | :--- |
+| **API Class** | `XSharedPreferences` | `XSharedPreferences` (hooked) | `XposedService` (App) / `XposedInterface` (Target) |
+| **Underlying IPC** | Direct file read (`MODE_WORLD_READABLE`) | SELinux-redirected filesystem path | **Binder IPC to LSPosed Daemon Database** |
+| **Storage Location** | `/data/data/<module>/shared_prefs/` | `/data/misc/.../prefs/<module>` | **LSPosed Daemon Secure SQLite Store** |
+| **SELinux Enforcement** | Broken on Android 7.0+ (Nougat) | Requires root daemon file redirection | Native Binder transactions; zero filesystem exposure |
+| **Change Listeners** | ❌ None | ⚠️ File-watch only (`key` is always `null`) | ✅ **Real-time Binder notifications with exact `key`** |
+| **Arbitrary Files** | ❌ World-readable files blocked | ❌ World-readable files blocked | ✅ **Remote Files (`ParcelFileDescriptor`)** |
+| **Multi-User Isolation** | ❌ None (leaks across profiles) | ⚠️ Partial | ✅ **Strict Per-User Isolation** |
+| **Dynamic Scope** | ❌ Manual reboot required | ❌ LSPosed Manager UI only | ✅ **Programmatic `requestScope()` / `removeScope()`** |
+| **Target Hot Reload** | ❌ Full app restart / reboot | ❌ Full app restart / reboot | ✅ **Live `hotReloadModule()` (API 102+)** |
 
 ---
 
-## 2. Remote Preferences
-
-Remote Preferences provide an atomic, multi-process key-value configuration store managed directly by the LSPosed daemon.
+## 2. Architecture Diagram
 
 ```mermaid
-flowchart LR
-    subgraph Module App [Module App UI]
-        UI[Settings Activity] -->|Writes Key-Value| Serv[XposedService.getRemotePreferences]
+flowchart TD
+    subgraph ModuleApp ["Module Configuration App (UI / Settings)"]
+        Activity["Settings Activity / ViewModel"]
+        XPProvider["XposedProvider\n(ContentProvider)"]
+        XPService["XposedServiceHelper\n-> XposedService Binder"]
+        Activity --> XPService
+        XPProvider -.->|Receives Binder via call()| XPService
     end
 
-    subgraph LSPosed [LSPosed Framework Daemon]
-        Serv -->|IPC / Binder| DB[(Daemon Database)]
+    subgraph LSPDaemon ["LSPosed Framework Daemon (lspd)"]
+        DaemonDB[(Secure SQLite Store)]
+        FileStore["/data/adb/lspd/modules/..."]
+        ScopeEngine["Scope Policy Manager"]
+        ReloadEngine["Hot Reload Coordinator"]
     end
 
-    subgraph Hooked Target [Hooked Application Process]
-        DB -->|IPC / SharedPreferences| Hook[XposedInterface.getRemotePreferences]
-        DB -.->|OnSharedPreferenceChangeListener| Hook
+    subgraph HookedProcess ["Hooked Application Process"]
+        XPModule["XposedModule\n(Inside Target App)"]
+        RemotePrefs["RemotePreferences\n(Implements SharedPreferences)"]
+        XPModule --> RemotePrefs
     end
+
+    XPService <-->|AIDL: IXposedService| LSPDaemon
+    XPModule <-->|Framework Internal Hook| LSPDaemon
+    LSPDaemon -->|Binder: IRemotePreferencesListener| RemotePrefs
 ```
 
-### 2.1 Reading Remote Preferences in Hooked Targets
-In your `XposedModule` class running inside the target app:
+---
 
-```java
-public class MyModule extends XposedModule {
-    @Override
-    public void onPackageReady(@NonNull PackageReadyParam param) {
-        // Retrieve read-only RemotePreferences for group "settings"
-        SharedPreferences prefs = getRemotePreferences("settings");
+## 3. Remote Preferences
 
-        boolean isFeatureEnabled = prefs.getBoolean("enable_feature", false);
-        String customTitle = prefs.getString("custom_title", "Default Title");
+Remote Preferences implement standard `android.content.SharedPreferences`, making integration seamless with existing Android UI components (`PreferenceFragmentCompat`, Jetpack Compose state, etc.).
 
-        // Register real-time change listener
-        prefs.registerOnSharedPreferenceChangeListener((sharedPreferences, key) -> {
-            log(Log.INFO, "MyModule", "Preference changed: " + key);
-            if ("enable_feature".equals(key)) {
-                boolean updatedVal = sharedPreferences.getBoolean(key, false);
-                // React to configuration update immediately!
+### 3.1 Reading in Hooked Target Process (`XposedModule`)
+
+In your target-hooked module code, access preferences via `getRemotePreferences(group)`:
+
+```kotlin
+class MyModule : XposedModule() {
+    override fun onPackageReady(param: PackageReadyParam) {
+        if (!param.isFirstPackage) return
+
+        // 1. Obtain group-named SharedPreferences
+        val prefs: SharedPreferences = getRemotePreferences("settings")
+
+        // 2. Read values with defaults
+        val isFeatureEnabled = prefs.getBoolean("enable_feature", false)
+        val customText = prefs.getString("custom_text", "default")
+        val counter = prefs.getInt("counter", 0)
+
+        // 3. Register real-time change listener
+        // Unlike legacy XSharedPreferences, key is non-null and identifies the exact modified entry
+        prefs.registerOnSharedPreferenceChangeListener { sharedPrefs, key ->
+            log(Log.INFO, "MyModule", "Preference changed: $key")
+            when (key) {
+                "enable_feature" -> {
+                    val updated = sharedPrefs.getBoolean(key, false)
+                    // Apply immediate logic change without restarting target process
+                }
             }
-        });
+        }
     }
 }
 ```
 
-### 2.2 Writing Remote Preferences in Module UI App
-In your Module's configuration app (Activity, Fragment, or ViewModel):
+### 3.2 Writing in Module Configuration App (`XposedService`)
+
+In your module's Activity or ViewModel, obtain the `XposedService` instance and write via `edit()`:
 
 ```kotlin
-// Retrieve XposedService instance via XposedServiceHelper
-val prefs = xposedService.getRemotePreferences("settings")
+val prefs = service.getRemotePreferences("settings")
 
-// Write preferences using standard SharedPreferences.Editor
+// Standard SharedPreferences Editor API
 prefs.edit()
     .putBoolean("enable_feature", true)
-    .putString("custom_title", "Supercharged Title")
-    .putInt("retry_count", 5)
-    .apply() // Asynchronously committed to LSPosed daemon
+    .putString("custom_text", "Updated value from UI")
+    .putInt("counter", 42)
+    .apply() // Asynchronously committed to LSPosed daemon store
+```
+
+### 3.3 Deleting Remote Preferences
+To delete an entire preference group:
+```kotlin
+service.deleteRemotePreferences("settings")
 ```
 
 ---
 
-## 3. Remote Files (Binary Blobs & Large Data)
+## 4. Remote Files (Binary Data & Large Blobs)
 
-When modules need to share arbitrary files (e.g. SQLite databases, media files, dynamic scripts, configuration JSONs) that exceed Binder transaction limits, use **Remote Files**.
+For data larger than Binder transaction limits (e.g. JSON rule sets, SQLite databases, scripts, images), modern LibXposed provides **Remote Files**. Files are stored in the module's private directory inside the LSPosed daemon storage and streamed via `ParcelFileDescriptor`.
 
-### 3.1 Writing Remote Files in Module App
+### 4.1 Writing a Remote File (Module App)
+
 ```kotlin
-// Open or create a remote file in the shared module directory
-val pfd: ParcelFileDescriptor = xposedService.openRemoteFile("rules.json")
+import android.os.ParcelFileDescriptor
+import java.io.FileWriter
 
-ParcelFileDescriptor.AutoCloseOutputStream(pfd).use { stream ->
-    stream.write(jsonString.toByteArray(Charsets.UTF_8))
-}
-```
-
-### 3.2 Reading Remote Files in Hooked Targets
-```java
-try (ParcelFileDescriptor pfd = openRemoteFile("rules.json")) {
-    try (FileReader reader = new FileReader(pfd.getFileDescriptor())) {
-        String content = new BufferedReader(reader).lines().collect(Collectors.joining("\n"));
-        log(Log.INFO, TAG, "Loaded remote rules:\n" + content);
+// Opens or creates the file in the LSPosed daemon store
+service.openRemoteFile("rules.json").use { pfd ->
+    FileWriter(pfd.fileDescriptor).use { writer ->
+        writer.write("{\"filter_ads\": true, \"version\": 2}")
     }
-} catch (FileNotFoundException e) {
-    log(Log.WARN, TAG, "Remote file rules.json does not exist yet");
 }
 ```
 
-### 3.3 Listing and Deleting Remote Files
+### 4.2 Reading a Remote File (Hooked Target)
+
+```kotlin
+import java.io.FileNotFoundException
+import java.io.FileReader
+
+try {
+    openRemoteFile("rules.json").use { pfd ->
+        val content = FileReader(pfd.fileDescriptor).readText()
+        log(Log.INFO, "MyModule", "Loaded remote rules: $content")
+    }
+} catch (e: FileNotFoundException) {
+    log(Log.WARN, "MyModule", "Remote file rules.json not found")
+}
+```
+
+### 4.3 Listing & Deleting Remote Files
+
 ```kotlin
 // In Module App:
-val files: Array<String> = xposedService.listRemoteFiles()
-xposedService.deleteRemoteFile("old_cache.dat")
+val files: Array<String> = service.listRemoteFiles()
+val deleted: Boolean = service.deleteRemoteFile("old_cache.dat")
 
-// In Hooked Target (read-only listing):
-String[] fileList = listRemoteFiles();
+// In Hooked Target:
+val targetFiles: Array<String> = listRemoteFiles()
 ```
+
+> [!CAUTION]
+> Filenames passed to `openRemoteFile` and `deleteRemoteFile` must not contain path separators (`/`) or relative navigation (`.` or `..`). Violations throw `IllegalArgumentException`.
 
 ---
 
-## 4. Module App Setup with `XposedServiceHelper`
+## 5. Module App Integration Guide
 
-To allow your module app to communicate with the LSPosed framework daemon:
+### 5.1 Gradle Dependencies (`build.gradle.kts`)
 
-### 4.1 Dependency Setup (`build.gradle.kts`)
 ```kotlin
 dependencies {
+    // Compile-only LibXposed API for module hooking
     compileOnly("io.github.libxposed:api:102.0.0")
+
+    // Implementation of service client for UI / settings app
     implementation("io.github.libxposed:service:102.0.0")
 }
 ```
 
-### 4.2 Manifest Configuration (`AndroidManifest.xml`)
-The `XposedProvider` ContentProvider must be declared in your module's `AndroidManifest.xml` so the LSPosed daemon can deliver the service binder on launch:
+### 5.2 Manifest Provider Setup (`AndroidManifest.xml`)
 
+The `libxposed:service` library includes an internal `XposedProvider` ContentProvider that receives the service binder directly from the LSPosed framework. 
+
+When you add `implementation("io.github.libxposed:service:...")`, Gradle's Manifest Merger automatically merges the provider:
 ```xml
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <application ...>
-        <!-- ContentProvider that receives the LSPosed Service Binder -->
-        <provider
-            android:name="io.github.libxposed.service.XposedProvider"
-            android:authorities="${applicationId}.xposed_provider"
-            android:exported="true"
-            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
-    </application>
-</manifest>
+<provider
+    android:name="io.github.libxposed.service.XposedProvider"
+    android:authorities="${applicationId}.XposedService"
+    android:exported="true"
+    tools:ignore="ExportedContentProvider" />
 ```
 
-> [!NOTE]
-> If targeting Android 11+ (API 30+), `XposedProvider` automatically notifies `RemotePreferences` when preferences are cleared or updated.
+> [!IMPORTANT]
+> The provider authority must follow `${applicationId}.XposedService` (case-sensitive). If declaring manually, do NOT customize the authority suffix.
 
-### 4.3 Registering the Service Listener in Application / Activity
+### 5.3 Application Class Setup (`App.kt`)
+
+Use `XposedServiceHelper.registerListener` in `Application.onCreate()` to safely listen for binder connections:
+
 ```kotlin
-class App : Application() {
+package com.example.module
+
+import android.app.Application
+import io.github.libxposed.service.XposedService
+import io.github.libxposed.service.XposedServiceHelper
+import java.util.concurrent.CopyOnWriteArraySet
+import kotlin.concurrent.Volatile
+
+class App : Application(), XposedServiceHelper.OnServiceListener {
+
     companion object {
-        var xposedService: XposedService? = null
+        @Volatile
+        var service: XposedService? = null
             private set
+
+        private val listeners = CopyOnWriteArraySet<ServiceConnectionListener>()
+
+        fun addConnectionListener(listener: ServiceConnectionListener, notifyImmediately: Boolean = true) {
+            listeners.add(listener)
+            if (notifyImmediately) {
+                listener.onServiceConnected(service)
+            }
+        }
+
+        fun removeConnectionListener(listener: ServiceConnectionListener) {
+            listeners.remove(listener)
+        }
     }
 
     override fun onCreate() {
         super.onCreate()
-        
-        // Register listener for LSPosed Framework Service
-        XposedServiceHelper.registerListener(object : XposedServiceHelper.OnServiceListener {
-            override fun onServiceBind(service: XposedService) {
-                Log.i("ModuleApp", "Connected to Xposed Framework: ${service.frameworkName} ${service.frameworkVersion} (API ${service.apiVersion})")
-                xposedService = service
-            }
+        // Register listener for LSPosed Framework Service binder
+        XposedServiceHelper.registerListener(this)
+    }
 
-            override fun onServiceDied(service: XposedService) {
-                Log.w("ModuleApp", "Xposed Framework service disconnected")
-                if (xposedService == service) {
-                    xposedService = null
-                }
-            }
-        })
+    interface ServiceConnectionListener {
+        fun onServiceConnected(service: XposedService?)
+    }
+
+    override fun onServiceBind(service: XposedService) {
+        App.service = service
+        listeners.forEach { it.onServiceConnected(service) }
+    }
+
+    override fun onServiceDied(service: XposedService) {
+        if (App.service == service) {
+            App.service = null
+            listeners.forEach { it.onServiceConnected(null) }
+        }
     }
 }
 ```
 
 ---
 
-## 5. Dynamic Scope Management
+## 6. Service Diagnostics & Properties
 
-LibXposed allows modules to dynamically query, request, and remove scoped target packages from within the module app:
+Once connected, `XposedService` exposes system capability and version information:
 
 ```kotlin
-// 1. Get current active scope list
-val activeScope: List<String> = service.scope
+val apiVersion: Int = service.apiVersion              // e.g. 102
+val frameworkName: String = service.frameworkName       // e.g. "LSPosed"
+val frameworkVersion: String = service.frameworkVersion // e.g. "2.2.0-beta6"
+val frameworkVersionCode: Long = service.frameworkVersionCode // e.g. 7480
 
-// 2. Request user approval to add new packages to scope
-val requestedPackages = listOf("com.instagram.android", "com.twitter.android")
-service.requestScope(requestedPackages, object : XposedService.OnScopeEventListener {
-    override fun onScopeRequestApproved(approved: List<String>) {
-        Log.i("ModuleApp", "User approved scope: $approved")
-    }
+// Inspect framework capability bitmask
+val props = service.frameworkProperties
 
-    override fun onScopeRequestFailed(message: String) {
-        Log.e("ModuleApp", "Scope request rejected: $message")
-    }
-})
-
-// 3. Remove packages from scope
-service.removeScope(listOf("com.unwanted.app"))
+val hasSystemCap = (props and XposedService.PROP_CAP_SYSTEM) != 0L
+val hasRemoteCap = (props and XposedService.PROP_CAP_REMOTE) != 0L
+val hasApiProtection = (props and XposedService.PROP_RT_API_PROTECTION) != 0L
 ```
 
 ---
 
-## 6. Querying Hooked Targets & Triggering Hot Reload (API 102+)
+## 7. Dynamic Scope Management
 
-The module UI app can query running hooked processes and trigger on-demand hot reloading:
+LibXposed allows modules to programmatically inspect, request, and revoke scope targets without requiring the user to navigate into the LSPosed Manager UI:
 
 ```kotlin
-// 1. Query all running processes currently hooked by this module
-val targets: List<HookedTarget> = service.runningTargets
+// 1. Query current approved scope
+val currentScope: List<String> = service.scope
 
-for (target in targets) {
-    Log.i("ModuleApp", "Hooked Target: pid=${target.pid}, pkg=${target.processName}, state=${target.state}")
-    
-    // Check if target is running an older generation
-    if (target.state == HookedTarget.State.STALE) {
-        // Trigger Hot Reload for this specific process
-        val extraData = Bundle().apply {
-            putString("reload_reason", "settings_updated")
+// 2. Request user approval to add packages to scope
+val targetPackages = listOf("com.target.app", "com.target.companion")
+
+service.requestScope(targetPackages, object : XposedService.OnScopeEventListener {
+    override fun onScopeRequestApproved(approved: List<String>) {
+        // Framework displayed a prompt to user and user granted permission
+        runOnUiThread {
+            Toast.makeText(context, "Scope granted for: $approved", Toast.LENGTH_SHORT).show()
         }
-        
-        service.hotReloadModule(target, extraData) { target, result ->
-            when (result.status) {
-                HotReloadResult.Status.SUCCESS -> 
-                    Log.i("ModuleApp", "Hot reload succeeded for ${target.processName}")
-                HotReloadResult.Status.FAILED -> 
-                    Log.e("ModuleApp", "Hot reload failed: ${result.message}")
-                HotReloadResult.Status.UNSUPPORTED -> 
-                    Log.w("ModuleApp", "Hot reload unsupported on target")
+    }
+
+    override fun onScopeRequestFailed(message: String) {
+        // User denied or request timed out
+        runOnUiThread {
+            Toast.makeText(context, "Scope request failed: $message", Toast.LENGTH_SHORT).show()
+        }
+    }
+})
+
+// 3. Remove packages from module scope
+service.removeScope(listOf("com.target.companion"))
+```
+
+---
+
+## 8. Querying Running Targets & Triggering Hot Reload (API 102+)
+
+In API 102+, modules can inspect currently running hooked processes and trigger on-demand live hot reload:
+
+```kotlin
+if (service.apiVersion >= XposedService.API_102) {
+    val targets: List<HookedTarget> = service.runningTargets
+
+    for (target in targets) {
+        Log.i("ModuleApp", "Hooked Target: pid=${target.pid}, pkg=${target.processName}, state=${target.state}, version=${target.loadedVersionCode}")
+
+        // Target states: UP_TO_DATE, STALE, RELOADING, FAILED
+        if (target.state == HookedTarget.State.STALE) {
+            val extraData = Bundle().apply {
+                putString("reason", "module_apk_updated")
+            }
+
+            service.hotReloadModule(target, extraData) { targetProcess, result ->
+                when (result.status) {
+                    HotReloadResult.Status.SUCCEEDED -> {
+                        Log.i("ModuleApp", "Hot reload succeeded for ${targetProcess.processName}")
+                    }
+                    HotReloadResult.Status.FAILED -> {
+                        Log.e("ModuleApp", "Hot reload failed: ${result.message}")
+                    }
+                    HotReloadResult.Status.UNSUPPORTED -> {
+                        Log.w("ModuleApp", "Hot reload unsupported on target")
+                    }
+                    HotReloadResult.Status.IN_PROGRESS -> {
+                        Log.i("ModuleApp", "Target is already reloading")
+                    }
+                    HotReloadResult.Status.PROCESS_DIED -> {
+                        Log.w("ModuleApp", "Target process terminated during reload")
+                    }
+                }
             }
         }
     }

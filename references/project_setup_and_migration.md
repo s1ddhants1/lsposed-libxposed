@@ -325,3 +325,50 @@ hook(loginMethod).intercept(chain -> {
 
 > [!NOTE]
 > Per the wiki: "We no longer provide interfaces like `XposedHelpers` in the framework anymore. But we will offer official libraries for a more friendly development kit." See [libxposed/helper](https://github.com/libxposed/helper) for the reflection and matcher DSL library.
+
+---
+
+## 8. Targeting & Packaging Modules for LSPatch (Rootless)
+
+Modules authored using modern LibXposed (API 101/102+) run on rootless **LSPatch** with zero modifications, provided they adhere to Android's application sandbox constraints.
+
+### 8.1 Module Design Considerations for Rootless Environments
+
+1. **Strict Target Process Scoping**:
+   - LSPatch runs inside the target app's sandbox. It cannot hook `system_server`, `com.android.systemui`, or third-party apps simultaneously.
+   - Always guard package entry in `onPackageReady`:
+     ```kotlin
+     override fun onPackageReady(param: PackageReadyParam) {
+         if (!param.isFirstPackage) return
+         if (param.packageName != "com.target.application") return
+         // Hook application logic
+     }
+     ```
+
+2. **No Root Filesystem Assumptions**:
+   - Never write to or read from `/data/adb/`, `/data/misc/`, or root-owned directories.
+   - Always use `getRemotePreferences()` or the Remote Files API (`openRemoteFile()`) which transparently serialize data across the LSPatch IPC bridge into SQLite (`lspatch-xposed-remote.db`).
+
+3. **Isolated Process Handling**:
+   - LSPatch skips isolated sub-processes (UIDs >= 90000, such as Chromium sandbox renderers) to prevent runtime crashes. Do not rely on hooks firing in isolated workers.
+
+### 8.2 Building & Testing with `lspatch.jar` CLI
+
+To test your compiled module against a target APK without requiring a rooted device:
+
+```bash
+# 1. Build your module release APK
+./gradlew :app:assembleRelease
+
+# 2. Patch target APK in Manager Mode (for live module development)
+java -jar lspatch.jar --manager -l 2 -f com.target.app.apk
+
+# 3. Or patch target APK in Standalone Integrated Mode (with embedded module)
+java -jar lspatch.jar -m app/build/outputs/apk/release/app-release.apk -l 2 -f com.target.app.apk
+
+# 4. Install patched APK to device/emulator via ADB
+adb install -r com.target.app-*-lspatched.apk
+```
+
+For complete reference on LSPatch flags, signature bypass levels, and runtime architecture, see [LSPatch Rootless Patching Guide](./lspatch_rootless_patching.md).
+

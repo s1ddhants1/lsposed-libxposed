@@ -15,6 +15,7 @@ This index provides a complete, exhaustive catalog of all technical reference do
 | **[helper_and_matcher_dsl.md](./helper_and_matcher_dsl.md)** | `libxposed:helper` & `helper-ktx`, `Reflector`, type-safe Matchers, `@DexAnalysis` bytecode analysis, disk caching | Obfuscated apps, reflection without string literals, bytecode pattern matching |
 | **[project_setup_and_migration.md](./project_setup_and_migration.md)** | Gradle setup, `libs.versions.toml`, `module.prop`, packaging merges, ProGuard rules, Android Lint, legacy XposedBridge migration | Bootstrapping new modules, configuring build files, migrating legacy modules |
 | **[lspctl_cli_and_daemon_internals.md](./lspctl_cli_and_daemon_internals.md)** | `lspctl` CLI syntax, JSON schemas, scope mutations, Developer Mode guards, SQLite database schema (`modules_config.db`), safe mode recovery | Live device testing, shell automation, debugging daemon state, disaster recovery |
+| **[lspatch_rootless_patching.md](./lspatch_rootless_patching.md)** | Rootless patching architecture, Local vs Integrated modes, `lspatch.jar` CLI, Signature Bypass (Levels 0-3), Documents Provider, in-process IPC | Running Xposed modules without root, repackaging APKs, bypassing app signature checks, batch patching automation |
 
 ---
 
@@ -125,6 +126,39 @@ This index provides a complete, exhaustive catalog of all technical reference do
   * Known configuration keys: `dex2oat_enabled`, `verbose_log`, `developer_mode`.
 * **5. Safe Mode & Emergency Recovery Subsystem**: Recovering bootloops caused by bad hooks.
 
+### 2.8 [LSPatch Rootless Patching Architecture & Guide](./lspatch_rootless_patching.md)
+* **1. Introduction & Conceptual Mental Model**: Comparison matrix between rootful LSPosed/Vector and rootless LSPatch.
+* **2. Binary & APK Rewriting Architecture**:
+  * Nested Zip strategy: `assets/lspatch/origin.apk` page-aligned at 4 KiB for direct `mmap()`.
+  * Zero-copy file linking via `apkzlib` (`addFileLink`).
+  * `appComponentFactory` redirection to `LSPAppComponentFactoryStub`.
+  * Dual configuration emission: manifest `<meta-data>` vs `assets/lspatch/config.json`.
+  * `metaloader.dex` vs `loader.dex` and the `--injectdex` alternative.
+* **3. Runtime Bootstrap & Execution Pipeline**:
+  * Sequence flow: zygote fork -> MetaLoader bootstrap -> JNI `PatchLoader::Load` -> in-memory dex classloader -> `LSPApplication.onLoad` -> context reconstruction -> ART profile disabling -> module loading & delivery -> signature bypass arming -> `realizeLoadedApk`.
+* **4. Execution Modes: Local (Manager) vs Integrated (Portable)**:
+  * Local/Manager Mode (`PatchMode.Local` / `--manager`): AIDL binding to `ModuleService`, dynamic module toggling, live hot reloading, manager cloaking and fallback candidates.
+  * Integrated Mode (`PatchMode.Integrated` / `-m`): 100% standalone APK, embedded modules, in-process `EmbeddedRemoteServices`, hot reload unsupported.
+* **5. Signature Bypass Subsystem (Deep Dive)**:
+  * Level 0 (`DISABLE`), Level 1 (`PM`: `PackageParser`, `PackageInfo.CREATOR`, `getPackageArchiveInfo`, `hasSigningCertificate`).
+  * Level 2 (`PM + OPENAT`: LSPlant libc `__openat` hook redirecting to cached `origin.apk`).
+  * Level 3 (`PM + OPENAT + SVC`: ARM64 raw `svc #0` instruction trampolines with Dobby near branches, linker `__loader_dlopen` rescan).
+* **6. Storage Access & Documents Provider**:
+  * Injected `LSPatchDocumentsProvider` (`<package>.lspatch.documents`) guarded by `android.permission.MANAGE_DOCUMENTS`.
+  * Classloader bridging (`bridgeDocumentsProviderClass`) for private `/data/data/<pkg>` access via SAF.
+* **7. Service & Remote Preferences Under LSPatch**:
+  * `RemotePreferenceStore` SQLite schema (`lspatch-xposed-remote.db`).
+  * Manager storage vs target app-private storage.
+  * Scope request behavior (`onScopeRequestFailed`).
+* **8. Command-Line Tool Reference (`lspatch.jar`)**:
+  * Full CLI parameter matrix, split APK handling, and output naming conventions.
+* **9. Practical Automation & CLI Recipes**:
+  * Manager mode, portable embedded mode, split APKs, security research, and custom keystores.
+* **10. Developer Guide: Writing Dual-Target Modules (LSPosed & LSPatch)**:
+  * Scope awareness, process isolation handling (`isIsolated()`), capability checks, and companion UI integration.
+* **11. Troubleshooting & Diagnostics Matrix**:
+  * Root cause resolution and logcat tags (`LSPatch`, `LSPatch-MetaLoader`, `LSPatch-SigBypass`).
+
 ---
 
 ## 3. Concept & API Cross-Reference
@@ -159,6 +193,15 @@ This index provides a complete, exhaustive catalog of all technical reference do
 | Packaging Merges | [project_setup_and_migration.md](./project_setup_and_migration.md) | `packaging.resources.merges += "META-INF/xposed/*"` |
 | `lspctl` CLI | [lspctl_cli_and_daemon_internals.md](./lspctl_cli_and_daemon_internals.md) | `lspctl status`, `lspctl module`, `lspctl scope` |
 | `modules_config.db` | [lspctl_cli_and_daemon_internals.md](./lspctl_cli_and_daemon_internals.md) | `/data/adb/lspd/config/modules_config.db` |
+| `lspatch.jar` CLI | [lspatch_rootless_patching.md](./lspatch_rootless_patching.md) | `java -jar lspatch.jar [options] <apks...>` |
+| `LSPAppComponentFactoryStub` | [lspatch_rootless_patching.md](./lspatch_rootless_patching.md) | `org.lsposed.lspatch.metaloader.LSPAppComponentFactoryStub` |
+| `LSPApplication` | [lspatch_rootless_patching.md](./lspatch_rootless_patching.md) | `org.lsposed.lspatch.loader.LSPApplication.onLoad()` |
+| `ApkPatcher` | [lspatch_rootless_patching.md](./lspatch_rootless_patching.md) | `org.lsposed.patch.ApkPatcher(logger, spec).patch()` |
+| `PatchSpec` / `PatchConfig` | [lspatch_rootless_patching.md](./lspatch_rootless_patching.md) | `PatchSpec.builder()...build()`, `assets/lspatch/config.json` |
+| `PatchMode` | [lspatch_rootless_patching.md](./lspatch_rootless_patching.md) | `PatchMode.Local` (Manager) vs `PatchMode.Integrated` (Embed) |
+| Signature Bypass L1-L3 | [lspatch_rootless_patching.md](./lspatch_rootless_patching.md) | `SigBypass.doSigBypass()`, `__openat` hook, raw-`svc` instrumentation |
+| `LSPatchDocumentsProvider` | [lspatch_rootless_patching.md](./lspatch_rootless_patching.md) | `<pkg>.lspatch.documents`, `android.permission.MANAGE_DOCUMENTS` |
+| `RemotePreferenceStore` (LSPatch) | [lspatch_rootless_patching.md](./lspatch_rootless_patching.md) | `lspatch-xposed-remote.db` SQLite store |
 
 ---
 

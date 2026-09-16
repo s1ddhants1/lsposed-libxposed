@@ -1,7 +1,7 @@
 ---
 name: lsposed-libxposed
 description: >-
-  LSPosed and modern LibXposed (API 101/102+) guide for Android ART hooking and module development.
+  LSPosed, modern LibXposed (API 101/102+), and rootless LSPatch guide for Android ART hooking and module development.
   Use for creating, debugging, testing, or migrating Xposed modules, hooking Java/Kotlin methods or constructors,
   using modern LibXposed APIs (XposedModule, Hooker, Chain, HookBuilder, Invoker, deoptimize, hookClassInitializer),
   configuring LSPosed metadata (module.prop, java_init.list, scope.list),
@@ -9,13 +9,14 @@ description: >-
   handling lifecycle and live hot reloading (onModuleLoaded, onPackageReady, onHotReloading, onHotReloaded),
   NDK C/C++ native hooks (NativeAPIEntries, native_init, on_library_loaded, JNIEnv),
   reflection and bytecode matching (libxposed:helper, Reflector, @DexAnalysis),
-  managing via lspctl CLI, or migrating legacy XposedBridge (de.robv.android.xposed) to modern LibXposed.
-  Do NOT use for Frida scripts, generic Magisk modules without Xposed, or apps without runtime hooking.
+  managing via lspctl CLI, patching rootless APKs via LSPatch (lspatch.jar, Manager Mode vs Integrated Mode,
+  Signature Bypass Levels 0-3, DocumentsProvider SAF private data access), or migrating legacy XposedBridge (de.robv.android.xposed).
+  Do NOT use for Frida scripts or generic Magisk modules without Xposed.
 ---
 
-# LSPosed & Modern LibXposed Development Guide
+# LSPosed, Modern LibXposed & LSPatch Development Guide
 
-Expert guide and reference manual for Android ART hooking and Xposed module development using **LSPosed** and modern **LibXposed** (API 101 / 102+).
+Expert guide and reference manual for Android ART hooking, Xposed module development, and rootless APK patching using **LSPosed**, modern **LibXposed** (API 101 / 102+), and **LSPatch**.
 
 > [!IMPORTANT]
 > **LLM Operating Constraint**: Modern LibXposed completely supersedes legacy `de.robv.android.xposed` (XposedBridge).
@@ -25,9 +26,9 @@ Expert guide and reference manual for Android ART hooking and Xposed module deve
 
 ## 1. Hallucination Traps & Golden Rules (CRITICAL)
 
-LLM training data is heavily biased toward 10-year-old deprecated XposedBridge APIs. You **MUST** strictly adhere to the modern LibXposed equivalents:
+LLM training data is heavily biased toward 10-year-old deprecated XposedBridge APIs. You **MUST** strictly adhere to the modern LibXposed and LSPatch standards:
 
-| Topic | ❌ Deprecated Hallucination (DO NOT USE) | ✅ Modern LibXposed Standard (MANDATORY) |
+| Topic | ❌ Deprecated Hallucination (DO NOT USE) | ✅ Modern LibXposed & LSPatch Standard (MANDATORY) |
 | :--- | :--- | :--- |
 | **API Dependency** | `compileOnly("de.robv.android.xposed:api:82")` | `compileOnly("io.github.libxposed:api:102.0.0")` |
 | **Service Dependency** | Hand-rolled ContentProvider / Broadcast IPC | `implementation("io.github.libxposed:service:102.0.0")` (Module UI only) |
@@ -40,9 +41,13 @@ LLM training data is heavily biased toward 10-year-old deprecated XposedBridge A
 | **Chain Proceed** | Calling `chain.proceed()` multiple times | `chain.proceed()` **MUST** be called at most once per interception |
 | **Original Invocation**| `XposedBridge.invokeOriginalMethod(...)` (slow reflection) | `getInvoker(method).setType(Invoker.Type.ORIGIN).invoke(...)` |
 | **Inlined Methods** | Hooks silently failing to trigger | Call `deoptimize(method)` on the `Executable` before hooking |
-| **Preferences** | `new XSharedPreferences(...)` (world-readable file hack) | `getRemotePreferences("name")` (LSPosed Daemon IPC) |
+| **Preferences** | `new XSharedPreferences(...)` (world-readable file hack) | `getRemotePreferences("name")` (LSPosed Daemon or LSPatch SQLite IPC) |
 | **AGP Packaging** | Omitting packaging configuration in Gradle | `packaging.resources { merges += "META-INF/xposed/*"; excludes += "**" }` |
 | **Hot Reload State** | Storing `ClassLoader`, `Class<?>`, or `Method` in static vars | Strictly clear all target references in `onHotReloading` to avoid ClassLoader leaks |
+| **Rootless Patching** | Decompiling/smali patching target APK | Use `lspatch.jar` with `origin.apk` zero-copy nesting (`ApkPatcher`) |
+| **LSPatch Modes** | Assuming embedded modules can hot-reload | Use `--manager` for live hot reload; Integrated (`-m`) is standalone static |
+| **Signature Bypass** | Disabling signature checks manually in smali | Set `-l 1` (PM), `-l 2` (libc `__openat`), or `-l 3` (raw ARM64 `svc #0`) |
+| **Rootless Storage** | Hardcoding `/data/adb/` or `/data/misc/` paths | Use `getRemotePreferences()` / Remote Files API (`lspatch-xposed-remote.db`) |
 
 ---
 
@@ -67,6 +72,11 @@ Use this table to immediately jump to the correct technical reference, key class
 | **Obfuscated target matching** | [helper_and_matcher_dsl.md](./references/helper_and_matcher_dsl.md#8-high-speed-reflector-engine) | `Reflector`, `@DexAnalysis`, `DexParser` | [helper_and_matcher_dsl.md](./references/helper_and_matcher_dsl.md) |
 | **Migrate legacy XposedBridge** | [project_setup_and_migration.md](./references/project_setup_and_migration.md#7-migration-guide-legacy-xposedbridge-to-modern-libxposed) | Legacy Translation Matrix | [project_setup_and_migration.md](./references/project_setup_and_migration.md) |
 | **Device testing via `lspctl` CLI**| [lspctl_cli_and_daemon_internals.md](./references/lspctl_cli_and_daemon_internals.md#1-the-lspctl-command-line-interface) | `lspctl status`, `lspctl module`, `lspctl scope` | [lspctl_cli_and_daemon_internals.md](./references/lspctl_cli_and_daemon_internals.md) |
+| **Patch APK rootless (Manager Mode)** | [lspatch_rootless_patching.md](./references/lspatch_rootless_patching.md#41-local--manager-mode-patchmodelocal) | `lspatch.jar --manager -l 2` | [lspatch_rootless_patching.md](./references/lspatch_rootless_patching.md#recipe-1-standard-manager-mode-patch) |
+| **Patch APK rootless (Integrated Mode)**| [lspatch_rootless_patching.md](./references/lspatch_rootless_patching.md#42-integrated--portable-mode-patchmodeintegrated) | `lspatch.jar -m <module.apk> -l 2` | [lspatch_rootless_patching.md](./references/lspatch_rootless_patching.md#recipe-2-standalone-portable-patch-with-embedded-modules) |
+| **Bypass APK Signature Checks**| [lspatch_rootless_patching.md](./references/lspatch_rootless_patching.md#5-signature-bypass-subsystem-deep-dive) | `-l 1` (PM), `-l 2` (openat), `-l 3` (svc) | [lspatch_rootless_patching.md](./references/lspatch_rootless_patching.md) |
+| **Access App Private Data (SAF)**| [lspatch_rootless_patching.md](./references/lspatch_rootless_patching.md#6-storage-access--documents-provider) | `--documents-provider`, SAF authority | [lspatch_rootless_patching.md](./references/lspatch_rootless_patching.md) |
+| **Patch Split APKs / Bundles** | [lspatch_rootless_patching.md](./references/lspatch_rootless_patching.md#8-command-line-tool-reference-lspatchjar) | `lspatch.jar base.apk split_*.apk` | [lspatch_rootless_patching.md](./references/lspatch_rootless_patching.md#recipe-3-multi-apk-app-bundle--split-apks-patching) |
 | **Complete Reference Master Index**| [INDEX.md](./references/INDEX.md) | Exhaustive section catalog, cross-reference table | [INDEX.md](./references/INDEX.md) |
 
 ---
@@ -243,6 +253,30 @@ public class ModuleMain extends XposedModule {
 
 ---
 
+### 3.5 Canonical LSPatch CLI Recipes (`lspatch.jar`)
+
+#### Manager Mode (Dynamic Module Scope & Hot Reload)
+```bash
+java -jar lspatch.jar --manager -l 2 -o ./out -f target.apk
+```
+
+#### Standalone Integrated Mode (Zero-Manager Portable APK)
+```bash
+java -jar lspatch.jar -m my_module.apk -l 2 -o ./out -f target.apk
+```
+
+#### Split APKs / App Bundles Patching
+```bash
+java -jar lspatch.jar --manager -l 2 -o ./out -f base.apk split_config.arm64_v8a.apk split_config.xxhdpi.apk
+```
+
+#### Reverse Engineering & Security Analysis Patch
+```bash
+java -jar lspatch.jar -m my_module.apk -d --cleartext --documents-provider -l 2 -o ./out -f target.apk
+```
+
+---
+
 ## 4. Core Hooking & IPC Patterns Cheatsheet
 
 ### 4.1 Modifying Arguments & Proceeding
@@ -321,11 +355,17 @@ When encountering compilation failures, test errors, or logcat exceptions, look 
 | Remote preferences return default values in hooked app | Scope not enabled, or permission/naming mismatch | Verify module is enabled for target package in LSPosed. Verify preference file name string matches exactly between App UI and target hook. |
 | OutOfMemoryError / ClassLoader leak on Hot Reload | Static fields holding target `ClassLoader` or `Class<?>` instances | Clear all static caches, lists, and listeners inside `onHotReloading(HotReloadingParam)`. |
 | `SecurityException: lspctl requires Developer Mode` | Developer mode guard active in LSPosed daemon | Run `adb shell su -c 'lspctl --bypass-developer-mode'` or toggle Developer Mode in LSPosed Manager settings. |
+| `No installed LSPatch manager carries the loader` | App was patched in Manager Mode, but LSPatch Manager is not installed or has a different package name | Install LSPatch Manager. If cloaked under custom package, re-patch with `--manager-package <name>` or use integrated mode (`-m`). |
+| Patched app crashes or detects tampering | Target app verifies APK signatures via libc or raw assembly syscalls | Re-patch with elevated signature bypass: `-l 2` (libc `__openat`) or `-l 3` (ARM64 raw `svc #0` instruction trampolines). |
+| `INSTALL_FAILED_VERSION_DOWNGRADE` | Installed target APK has higher `versionCode` than patched build | Run `lspatch.jar` with `--version-code <currentVersionCode + 1>`. |
+| `INSTALL_FAILED_UPDATE_INCOMPATIBLE` on splits | Split APKs were signed with differing keys | Pass all split APKs together in a single `lspatch.jar` invocation so they share a key. |
+| `HOT_RELOAD_UNSUPPORTED` in target | Live hot reload requested while running in Integrated Mode | Hot reload is supported only in Manager Mode (`--manager`). Integrated mode bakes modules into APK assets statically. |
 
 ---
 
-## 6. Verification & Device Testing via `lspctl` CLI
+## 6. Verification & Device Testing Workflows
 
+### 6.1 Rooted Testing via `lspctl` CLI
 Execute commands via `adb shell su -c`:
 
 ```bash
@@ -349,12 +389,31 @@ lspctl scope add com.example.module com.target.application
 am force-stop com.target.application && monkey -p com.target.application -c android.intent.category.LAUNCHER 1
 ```
 
+### 6.2 Rootless Testing via `lspatch.jar` CLI & ADB
+Test modules on non-rooted devices or emulators using `lspatch.jar`:
+
+```bash
+# 1. Pull target APK from connected device
+adb shell pm path com.target.application
+adb pull /data/app/.../base.apk ./target.apk
+
+# 2. Patch APK with your module (Integrated Mode, Signature Bypass L2)
+java -jar lspatch.jar -m my_module.apk -l 2 -o ./out -f target.apk
+
+# 3. Install patched APK
+adb install -r ./out/target-*-lspatched.apk
+
+# 4. Stream live LSPatch runtime logs
+adb logcat -s LSPatch LSPatch-MetaLoader LSPatch-SigBypass LSPatch-RemotePrefs
+```
+
 ---
 
 ## 7. Master Documentation Index
 
 For exhaustive architectural deep-dives, see:
 - 📑 **[Master Reference Index (INDEX.md)](./references/INDEX.md)**: Exhaustive catalog of all sections, classes, and signatures.
+- 📦 **[LSPatch Rootless Patching](./references/lspatch_rootless_patching.md)**: Zero-root patching, Manager vs Integrated modes, Signature Bypass (L0-L3), DocumentsProvider.
 - 📖 **[Modern LibXposed API](./references/modern_libxposed_api.md)**: Full API 101/102 specification and invokers.
 - 🔄 **[Lifecycle & Hot Reloading](./references/hot_reloading_and_lifecycle.md)**: Process phases and hot reload mechanics.
 - 📡 **[Service & IPC Guide](./references/service_and_ipc.md)**: Remote Preferences, Remote Files, and `XposedProvider`.
@@ -362,3 +421,4 @@ For exhaustive architectural deep-dives, see:
 - 🔍 **[Helper & Matcher DSL](./references/helper_and_matcher_dsl.md)**: Obfuscated targets, `Reflector`, and `@DexAnalysis`.
 - 🛠️ **[Project Setup & Migration](./references/project_setup_and_migration.md)**: Gradle setup and legacy migration guide.
 - 💻 **[Daemon Internals & lspctl](./references/lspctl_cli_and_daemon_internals.md)**: CLI reference, SQLite schemas, and safe mode.
+

@@ -349,3 +349,56 @@ if (service.apiVersion >= XposedService.API_102) {
     }
 }
 ```
+
+---
+
+## 9. Rootless Environment (LSPatch) IPC Architecture
+
+When running under **LSPatch** without root, the LibXposed Service IPC subsystem adapts its underlying transport while maintaining complete API compatibility for `XposedService`, `RemotePreferences`, and `RemoteFiles`.
+
+### 9.1 Mode-Dependent IPC Routing
+
+```mermaid
+flowchart TD
+    subgraph ManagerMode ["LSPatch Manager Mode"]
+        AppHookM["Hooked Target (XposedModule)"] <-->|AIDL: IModuleService| Mgr["LSPatch Manager Process"]
+        AppUIM["Module Companion App (UI)"] <-->|AIDL: IXposedService| Mgr
+        Mgr <--> StoreM[("Manager RemotePreferenceStore\n(lspatch-xposed-remote.db)")]
+    end
+
+    subgraph IntegratedMode ["LSPatch Integrated / Portable Mode"]
+        AppHookI["Hooked Target (XposedModule)"] <--> LocalSVC["EmbeddedRemoteServices (In-Process)"]
+        LocalSVC <--> StoreI[("Host App RemotePreferenceStore\n(/data/data/<pkg>/databases/...)")]
+        LocalSVC -.->|In-Process Binder Delivery| Helper["XposedServiceHelper.onBinderReceived()"]
+    end
+```
+
+### 9.2 IPC Transport Differences
+
+| Feature | Rootful LSPosed (`lspd`) | LSPatch Manager Mode | LSPatch Integrated Mode |
+| :--- | :--- | :--- | :--- |
+| **Backing Process** | Global root daemon (`/data/adb/lspd`) | LSPatch Manager app process | **Self-contained in target host process** |
+| **Database File** | `/data/adb/lspd/config/modules_config.db` | Manager's `lspatch-xposed-remote.db` | Target app's `lspatch-xposed-remote.db` |
+| **Binder Delivery** | System-pushed to `XposedProvider` | Manager-pushed to `XposedProvider` | **Direct in-process method call** |
+| **`requestScope()`** | System dialog prompt to user | ❌ Always fails (`onScopeRequestFailed`) | ❌ Always fails (`onScopeRequestFailed`) |
+| **`hotReloadModule()`** | Fully supported across targets | Supported via `ManagerHotReloadDriver` | ❌ Throws `HOT_RELOAD_UNSUPPORTED` |
+| **Framework Name** | `"LSPosed"` | `"LSPatch"` | `"LSPatch"` |
+| **Framework Properties**| `PROP_CAP_SYSTEM \| PROP_CAP_REMOTE` | `PROP_CAP_REMOTE` | `PROP_CAP_REMOTE` |
+
+### 9.3 Handling Scope and Capability Differences in Code
+
+```kotlin
+// Check framework capabilities dynamically
+val props = service.frameworkProperties
+val isRootful = (props and XposedService.PROP_CAP_SYSTEM) != 0L
+
+if (!isRootful) {
+    // In LSPatch rootless mode:
+    // 1. requestScope() cannot grant new apps dynamically; notify the user to re-patch
+    // 2. hotReloadModule() is only available if Manager Mode is active
+    Log.i("ModuleApp", "Running in rootless LSPatch mode")
+}
+```
+
+For complete architectural details on LSPatch, see [LSPatch Rootless Patching Guide](./lspatch_rootless_patching.md).
+

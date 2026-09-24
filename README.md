@@ -6,11 +6,12 @@ An agent skill for modern Android ART hooking, Xposed module development, native
 
 Install this skill using the `skills` CLI:
 
-```bash
 # Global install (recommended for all AI coding agents)
+```bash
 npx skills add s1ddhants1/lsposed-libxposed -g
-
-# Or project-specific install
+```
+# Project-specific install
+```bash
 npx skills add s1ddhants1/lsposed-libxposed
 ```
 
